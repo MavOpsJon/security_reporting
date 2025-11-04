@@ -151,104 +151,55 @@ Write-Host "`nAnalyzing simulation: $simName" -ForegroundColor Cyan
 Write-Host "Simulation ID: $simId" -ForegroundColor Gray
 
 try {
-    # Try to get simulation participants directly from the simulation endpoint
-    Write-Host "`nRetrieving simulation details and participants..." -ForegroundColor Cyan
+    # Get per-simulation user data using the correct API endpoint
+    Write-Host "`nRetrieving detailed user data for simulation..." -ForegroundColor Cyan
 
-    try {
-        # Try the simulation endpoint to see if it has participant data
-        $simUri = "https://graph.microsoft.com/v1.0/security/attackSimulation/simulations/$simId"
-        $simulationData = Invoke-MgGraphRequest -Uri $simUri -Method GET
+    $simulationUsersUri = "https://graph.microsoft.com/beta/security/attackSimulation/simulations/$simId/report/simulationUsers"
+    $simulationUsersResponse = Invoke-MgGraphRequest -Uri $simulationUsersUri -Method GET
+    $simulationUsers = $simulationUsersResponse.value
 
-        Write-Host "Simulation details retrieved. Checking for participant data..." -ForegroundColor Gray
-        Write-Host "Simulation: $($simulationData.displayName)" -ForegroundColor White
-        Write-Host "Status: $($simulationData.status)" -ForegroundColor White
+    Write-Host "Found $($simulationUsers.Count) total users in simulation '$simName'" -ForegroundColor Cyan
 
-        # Check if the simulation has user data directly
-        if ($simulationData.users -or $simulationData.participants -or $simulationData.simulationUsers) {
-            Write-Host "Found direct user data in simulation!" -ForegroundColor Green
-            # Process direct user data if available
-        } else {
-            Write-Host "No direct user data in simulation object. Checking for account targets..." -ForegroundColor Yellow
-
-            # Try to get included account targets
-            try {
-                $includedTargetsUri = "https://graph.microsoft.com/beta/security/attackSimulation/simulations/$simId/includedAccountTarget"
-                $includedTargets = Invoke-MgGraphRequest -Uri $includedTargetsUri -Method GET -ErrorAction SilentlyContinue
-
-                if ($includedTargets -and $includedTargets.type) {
-                    Write-Host "Found included account targets of type: $($includedTargets.type)" -ForegroundColor Green
-
-                    # If it's addressBook type, there might be user data
-                    if ($includedTargets.type -eq "addressBook" -and $includedTargets.accountTargetEmails) {
-                        Write-Host "Found target emails in simulation!" -ForegroundColor Green
-                        $simulationParticipants = $includedTargets.accountTargetEmails
-                        Write-Host "Simulation has $($simulationParticipants.Count) target participants" -ForegroundColor Cyan
-                    }
-                } else {
-                    Write-Host "No usable included account targets found" -ForegroundColor Yellow
-                }
-            } catch {
-                Write-Host "Could not retrieve account targets: $_" -ForegroundColor Yellow
-            }
-        }
-
-    } catch {
-        Write-Host "Could not get simulation details: $_" -ForegroundColor Yellow
+    # Filter for users who were compromised (clicked/opened the phishing simulation)
+    $compromisedUsers = $simulationUsers | Where-Object {
+        $_.isCompromised -eq $true
     }
 
-    # Since direct simulation user data isn't available, we'll use the coverage API
-    # but filter the results to show only users and include a note about the limitation
-    Write-Host "`nUsing coverage API (limitation: shows all user compromise data)..." -ForegroundColor Cyan
-    $coverageUri = "https://graph.microsoft.com/beta/reports/getAttackSimulationSimulationUserCoverage"
-    $coverageResponse = Invoke-MgGraphRequest -Uri $coverageUri -Method GET
-    $userCoverageData = $coverageResponse.value
+    Write-Host "Found $($compromisedUsers.Count) compromised users in this simulation" -ForegroundColor $(if ($compromisedUsers.Count -gt 0) { "Red" } else { "Green" })
 
-    Write-Host "Found $($userCoverageData.Count) total users with simulation data" -ForegroundColor Yellow
-
-    # Filter for users who have been compromised and participated in simulations
-    $allCompromisedUsers = $userCoverageData | Where-Object { $_.compromisedCount -gt 0 }
-    Write-Host "Found $($allCompromisedUsers.Count) users who have been compromised across ALL simulations" -ForegroundColor Yellow
-
-    # Now filter to only users who were part of the selected simulation
-    if ($simulationParticipants -and $simulationParticipants.Count -gt 0) {
-        Write-Host "`nFiltering to show only users from the selected simulation..." -ForegroundColor Cyan
-
-        $compromisedUsers = $allCompromisedUsers | Where-Object {
-            $userEmail = $_.attackSimulationUser.email
-            $simulationParticipants -contains $userEmail
-        }
-
-        Write-Host "Found $($compromisedUsers.Count) users who were compromised specifically in '$simName'" -ForegroundColor $(if ($compromisedUsers.Count -gt 0) { "Red" } else { "Green" })
-        Write-Host "Out of $($simulationParticipants.Count) total participants in this simulation" -ForegroundColor Gray
-
-        if ($compromisedUsers.Count -eq 0) {
-            Write-Host "No users were compromised in the selected simulation '$simName'." -ForegroundColor Green
-            Write-Host "This simulation had a 100% success rate!" -ForegroundColor Green
-            Disconnect-MgGraph
-            exit 0
-        }
-    } else {
-        Write-Host "Could not get simulation participant list - showing all compromised users with limitation note" -ForegroundColor Yellow
-        $compromisedUsers = $allCompromisedUsers
-
-        if ($compromisedUsers.Count -eq 0) {
-            Write-Host "No failed users found in any simulations." -ForegroundColor Green
-            Disconnect-MgGraph
-            exit 0
-        }
+    if ($compromisedUsers.Count -eq 0) {
+        Write-Host "No users were compromised in the selected simulation '$simName'." -ForegroundColor Green
+        Write-Host "This simulation had a 100% success rate!" -ForegroundColor Green
+        Disconnect-MgGraph
+        exit 0
     }
 
     # Process each compromised user
-    foreach ($userCoverage in $compromisedUsers) {
-        $userId = $userCoverage.attackSimulationUser.userId
-        $userEmail = $userCoverage.attackSimulationUser.email
-        $userDisplayName = $userCoverage.attackSimulationUser.displayName
-        $latestSimulationDate = $userCoverage.latestSimulationDateTime
+    foreach ($simUser in $compromisedUsers) {
+        # Extract user information from the simulation user object
+        $userEmail = $simUser.userPrincipalName
+        $userDisplayName = $simUser.displayName
+        $userId = $simUser.userId
+
+        # Extract simulation-specific data
+        $isCompromised = $simUser.isCompromised
+        $reportedPhish = $simUser.reportedPhish
+        $eventsCount = if ($simUser.eventsCount) { $simUser.eventsCount } else { 0 }
+        $trainingStatus = if ($simUser.trainingStatus) { $simUser.trainingStatus } else { "N/A" }
+        $assignedTrainingsCount = if ($simUser.assignedTrainingsCount) { $simUser.assignedTrainingsCount } else { 0 }
+        $completedTrainingsCount = if ($simUser.completedTrainingsCount) { $simUser.completedTrainingsCount } else { 0 }
+        $inProgressTrainingsCount = if ($simUser.inProgressTrainingsCount) { $simUser.inProgressTrainingsCount } else { 0 }
+
+        # Extract event details (actions taken)
+        $userActions = "N/A"
+        if ($simUser.simulationEvents -and $simUser.simulationEvents.Count -gt 0) {
+            $userActions = ($simUser.simulationEvents | ForEach-Object { $_.eventName }) -join ", "
+        }
 
         Write-Host "  Processing compromised user: $userDisplayName ($userEmail)" -ForegroundColor Gray
 
         try {
-            # Get detailed user information
+            # Get detailed user information from Entra ID
             $userUri = "https://graph.microsoft.com/v1.0/users/$($userId)?`$select=displayName,mail,department,jobTitle,officeLocation"
             $userDetails = Invoke-MgGraphRequest -Uri $userUri -Method GET -ErrorAction SilentlyContinue
 
@@ -266,78 +217,25 @@ try {
                 Write-Verbose "Could not retrieve manager for $userDisplayName : $_"
             }
 
-            # Get sign-in logs for device information around the compromise time
-            $deviceInfo = "N/A"
-            $browserInfo = "N/A"
-            $osInfo = "N/A"
-            $ipAddress = "N/A"
-
-            if ($latestSimulationDate) {
-                try {
-                    Write-Host "    Checking sign-in logs for device details..." -ForegroundColor DarkGray
-
-                    # Parse the latest simulation time and look for sign-ins within a 2-hour window
-                    $simulationTime = [DateTime]::Parse($latestSimulationDate)
-                    $startTime = $simulationTime.AddHours(-1).ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
-                    $endTime = $simulationTime.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
-
-                    # Query sign-in logs
-                    $signInUri = "https://graph.microsoft.com/v1.0/auditLogs/signIns?`$filter=userId eq '$userId' and createdDateTime ge $startTime and createdDateTime le $endTime&`$orderby=createdDateTime desc&`$top=5"
-                    $signInResponse = Invoke-MgGraphRequest -Uri $signInUri -Method GET -ErrorAction SilentlyContinue
-
-                    if ($signInResponse.value -and $signInResponse.value.Count -gt 0) {
-                        # Get the closest sign-in to the simulation time
-                        $closestSignIn = $signInResponse.value | Sort-Object {
-                            [Math]::Abs(([DateTime]::Parse($_.createdDateTime) - $simulationTime).TotalMinutes)
-                        } | Select-Object -First 1
-
-                        if ($closestSignIn.deviceDetail) {
-                            $deviceInfo = if ($closestSignIn.deviceDetail.deviceId) {
-                                "$($closestSignIn.deviceDetail.displayName) ($($closestSignIn.deviceDetail.operatingSystem))"
-                            } else {
-                                $closestSignIn.deviceDetail.operatingSystem
-                            }
-                            $browserInfo = $closestSignIn.deviceDetail.browser
-                            $osInfo = $closestSignIn.deviceDetail.operatingSystem
-                        }
-
-                        if ($closestSignIn.ipAddress) {
-                            $ipAddress = $closestSignIn.ipAddress
-                        }
-
-                        if ($closestSignIn.location) {
-                            $location = "$($closestSignIn.location.city), $($closestSignIn.location.countryOrRegion)"
-                        } else {
-                            $location = "N/A"
-                        }
-                    }
-                } catch {
-                    Write-Verbose "Could not retrieve sign-in logs for $userDisplayName : $_"
-                }
-            }
-
-            # Create report object
+            # Create report object with simulation-specific data
             $reportObject = [PSCustomObject]@{
-                SelectedSimulation = $simName
-                SimulationSpecific = if ($simulationParticipants -and $simulationParticipants.Count -gt 0) { "Yes - filtered to this simulation" } else { "No - API limitation, shows all compromised users" }
+                SimulationName = $simName
                 UserDisplayName = $userDisplayName
                 UserEmail = $userEmail
                 UserId = $userId
+                IsCompromised = $isCompromised
+                ReportedPhish = $reportedPhish
+                UserActions = $userActions
+                EventsCount = $eventsCount
+                TrainingStatus = $trainingStatus
+                AssignedTrainings = $assignedTrainingsCount
+                CompletedTrainings = $completedTrainingsCount
+                InProgressTrainings = $inProgressTrainingsCount
                 Department = if ($userDetails.department) { $userDetails.department } else { "N/A" }
                 JobTitle = if ($userDetails.jobTitle) { $userDetails.jobTitle } else { "N/A" }
                 OfficeLocation = if ($userDetails.officeLocation) { $userDetails.officeLocation } else { "N/A" }
                 ManagerName = $managerName
                 ManagerEmail = $managerEmail
-                TotalSimulations = $userCoverage.simulationCount
-                TotalClicks = $userCoverage.clickCount
-                TotalCompromised = $userCoverage.compromisedCount
-                CompromiseRate = [math]::Round(($userCoverage.compromisedCount / $userCoverage.simulationCount) * 100, 2)
-                LatestSimulationDate = $latestSimulationDate
-                DeviceInfo = $deviceInfo
-                Browser = $browserInfo
-                OperatingSystem = $osInfo
-                IPAddress = $ipAddress
-                Location = if ($location) { $location } else { "N/A" }
             }
 
             $failedUsersReport += $reportObject
@@ -347,26 +245,23 @@ try {
 
             # Add minimal record
             $reportObject = [PSCustomObject]@{
-                SelectedSimulation = $simName
-                SimulationSpecific = if ($simulationParticipants -and $simulationParticipants.Count -gt 0) { "Yes - filtered to this simulation" } else { "No - API limitation, shows all compromised users" }
+                SimulationName = $simName
                 UserDisplayName = $userDisplayName
                 UserEmail = $userEmail
                 UserId = $userId
+                IsCompromised = $isCompromised
+                ReportedPhish = $reportedPhish
+                UserActions = $userActions
+                EventsCount = $eventsCount
+                TrainingStatus = $trainingStatus
+                AssignedTrainings = $assignedTrainingsCount
+                CompletedTrainings = $completedTrainingsCount
+                InProgressTrainings = $inProgressTrainingsCount
                 Department = "Unable to retrieve"
                 JobTitle = "Unable to retrieve"
                 OfficeLocation = "Unable to retrieve"
                 ManagerName = "Unable to retrieve"
                 ManagerEmail = "Unable to retrieve"
-                TotalSimulations = $userCoverage.simulationCount
-                TotalClicks = $userCoverage.clickCount
-                TotalCompromised = $userCoverage.compromisedCount
-                CompromiseRate = [math]::Round(($userCoverage.compromisedCount / $userCoverage.simulationCount) * 100, 2)
-                LatestSimulationDate = $latestSimulationDate
-                DeviceInfo = "Unable to retrieve"
-                Browser = "Unable to retrieve"
-                OperatingSystem = "Unable to retrieve"
-                IPAddress = "Unable to retrieve"
-                Location = "Unable to retrieve"
             }
 
             $failedUsersReport += $reportObject
