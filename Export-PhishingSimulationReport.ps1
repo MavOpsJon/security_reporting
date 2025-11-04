@@ -151,12 +151,25 @@ Write-Host "`nAnalyzing simulation: $simName" -ForegroundColor Cyan
 Write-Host "Simulation ID: $simId" -ForegroundColor Gray
 
 try {
-    # Get per-simulation user data using the correct API endpoint
+    # Get per-simulation user data using the correct API endpoint with pagination
     Write-Host "`nRetrieving detailed user data for simulation..." -ForegroundColor Cyan
 
+    $simulationUsers = @()
     $simulationUsersUri = "https://graph.microsoft.com/beta/security/attackSimulation/simulations/$simId/report/simulationUsers"
-    $simulationUsersResponse = Invoke-MgGraphRequest -Uri $simulationUsersUri -Method GET
-    $simulationUsers = $simulationUsersResponse.value
+
+    do {
+        Write-Host "  Fetching page of simulation users..." -ForegroundColor Gray
+        $simulationUsersResponse = Invoke-MgGraphRequest -Uri $simulationUsersUri -Method GET
+
+        if ($simulationUsersResponse.value) {
+            $simulationUsers += $simulationUsersResponse.value
+            Write-Host "  Retrieved $($simulationUsersResponse.value.Count) users (total so far: $($simulationUsers.Count))" -ForegroundColor Gray
+        }
+
+        # Check for next page
+        $simulationUsersUri = $simulationUsersResponse.'@odata.nextLink'
+
+    } while ($simulationUsersUri)
 
     Write-Host "Found $($simulationUsers.Count) total users in simulation '$simName'" -ForegroundColor Cyan
 
@@ -177,9 +190,9 @@ try {
     # Process each compromised user
     foreach ($simUser in $compromisedUsers) {
         # Extract user information from the simulation user object
-        $userEmail = $simUser.userPrincipalName
-        $userDisplayName = $simUser.displayName
-        $userId = $simUser.userId
+        $userEmail = if ($simUser.simulationUser.email) { $simUser.simulationUser.email } else { $simUser.userPrincipalName }
+        $userDisplayName = if ($simUser.simulationUser.displayName) { $simUser.simulationUser.displayName } else { $simUser.displayName }
+        $userId = if ($simUser.simulationUser.userId) { $simUser.simulationUser.userId } else { $simUser.userId }
 
         # Extract simulation-specific data
         $isCompromised = $simUser.isCompromised
