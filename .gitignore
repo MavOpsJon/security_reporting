@@ -1,0 +1,19 @@
+# Output files
+*.csv
+*.xlsx
+
+# Logs
+*.log
+
+# Credentials
+*.json
+*.xml
+credentials*
+secrets*
+
+# PowerShell
+*.ps1xml
+
+# OS
+.DS_Store
+Thumbs.db
